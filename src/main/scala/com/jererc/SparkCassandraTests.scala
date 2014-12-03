@@ -43,6 +43,7 @@ object SparkCassandraTests {
   }
 
   def main(args: Array[String]) {
+
     val jsonConf = parse(defaultConf) merge parse(Source.fromFile("local_settings.json").getLines.mkString)
     val conf = jsonConf.extract[Conf]
 
@@ -52,8 +53,6 @@ object SparkCassandraTests {
     // We push this assembly into spark
     val sparkJars = recursiveListFiles(new File("target"), """\bassembly\b.*\.jar$""".r).map(f => f.getAbsolutePath)
     sparkConf.setJars(sparkJars)
-
-    var errors = List[String]()
 
     // Init cassandra keyspace and tables
     val connector = CassandraConnector(sparkConf)
@@ -71,6 +70,8 @@ object SparkCassandraTests {
     val sc = new SparkContext(s"spark://${conf.sparkMasterHost}:${conf.sparkMasterPort}",
       "TestCassandra", sparkConf)
 
+    var errors = List[String]()
+
     // Test input table
     val rdd = sc.cassandraTable(conf.cassandraKeyspace, conf.cassandraInputTable)
     val count = 10000
@@ -78,41 +79,72 @@ object SparkCassandraTests {
     val collection = sc.parallelize(data)
     collection.saveToCassandra(conf.cassandraKeyspace, conf.cassandraInputTable,
       SomeColumns("id", "data"))
-    if (rdd.count != count) {
+    val result = rdd.map(row => (row.getInt("id"), row.getString("data"))).collect.sortBy(_._1)
+    val expected = data.toArray
+    if (result.deep != expected.deep) {
       errors :+= "invalid cassandra input table content"
     }
 
     // Test filter
-    val expected = (0 to 9).toArray.map(n => (n, s"value $n"))
-    val rdd2 = rdd.filter(row => row.getInt("id") < 10)
-    val res1 = rdd2.map(row => (row.getInt("id"), row.getString("data"))).collect.sortBy(_._1)
-    if (res1.deep != expected.deep) {
+    val rdd2 = sc.cassandraTable(conf.cassandraKeyspace, conf.cassandraInputTable)
+    val rdd3 = rdd2.filter(row => row.getInt("id") < 10)
+    val result2 = rdd3.map(row => (row.getInt("id"), row.getString("data"))).collect.sortBy(_._1)
+    val expected2 = (0 to 9).toArray.map(n => (n, s"value $n"))
+    if (result2.deep != expected2.deep) {
       errors :+= "invalid filter result"
     }
 
     // Test output table
-    rdd2.saveToCassandra(conf.cassandraKeyspace, conf.cassandraOutputTable,
+    val rdd4 = sc.cassandraTable(conf.cassandraKeyspace, conf.cassandraInputTable)
+    val rdd5 = rdd4.filter(row => row.getInt("id") < 10)
+    rdd5.saveToCassandra(conf.cassandraKeyspace, conf.cassandraOutputTable,
       SomeColumns("id", "data"))
-    val res2 = sc.cassandraTable[(Int, String)](conf.cassandraKeyspace, conf.cassandraOutputTable)
+    val result3 = sc.cassandraTable[(Int, String)](conf.cassandraKeyspace, conf.cassandraOutputTable)
       .select("id", "data").collect.sortBy(_._1)
-    if (res2.deep != expected.deep) {
+    val expected3 = (0 to 9).toArray.map(n => (n, s"value $n"))
+    if (result3.deep != expected3.deep) {
       errors :+= "invalid cassandra output table content"
     }
 
     // Test select / where
-    val expected2 = Array((11, "value 11"))
-    val rdd3 = rdd.select("id", "data").where("id = ?", "11")
-    val res3 = rdd3.map(row => (row.getInt("id"), row.getString("data"))).collect
-    if (res3.deep != expected2.deep) {
+    val rdd6 = sc.cassandraTable(conf.cassandraKeyspace, conf.cassandraInputTable)
+    val rdd7 = rdd6.select("id", "data").where("id = ?", "11")
+    val result4 = rdd7.map(row => (row.getInt("id"), row.getString("data"))).collect
+    val expected4 = Array((11, "value 11"))
+    if (result4.deep != expected4.deep) {
       errors :+= "invalid where content"
     }
 
-    // Test spark SQL
+    // Test SQL
     val cc = new CassandraSQLContext(sc)
-    val rdd4: SchemaRDD = cc.sql(s"SELECT * from ${conf.cassandraKeyspace}.${conf.cassandraInputTable} WHERE id < 10")
-    val res4 = rdd4.map(e => (e.getInt(0), e.getString(1))).collect.sortBy(_._1)
-    if (res4.deep != expected.deep) {
+    val rdd8: SchemaRDD = cc.sql(s"SELECT * from ${conf.cassandraKeyspace}.${conf.cassandraInputTable} WHERE id < 10")
+    val result5 = rdd8.map(e => (e.getInt(0), e.getString(1))).collect.sortBy(_._1)
+    val expected5 = (0 to 9).toArray.map(n => (n, s"value $n"))
+    if (result5.deep != expected5.deep) {
       errors :+= "invalid sql result"
+    }
+
+    // Test common transformations and actions
+    val rdd9 = sc.cassandraTable(conf.cassandraKeyspace, conf.cassandraInputTable)
+    val rdd10 = rdd9
+      .filter(row => (row.getInt("id") >= 100 && row.getInt("id") < 110) || (row.getInt("id") >= 1000 && row.getInt("id") < 1010))
+      .map(row => (row.getInt("id"), s"new ${row.getString("data")}"))
+    if (rdd10.count != 20) {
+      errors :+= "invalid count result"
+    }
+    val result6 = rdd10.collect.sortBy(_._1)
+    val expected6 = ((100 to 109) ++ (1000 to 1009)).toArray.map(n => (n, s"new value $n"))
+    if (result6.deep != expected6.deep) {
+      errors :+= "invalid map result"
+    }
+
+    val rdd11 = rdd9
+      .filter(row => row.getInt("id") >= 100 && row.getInt("id") < 110)
+      .map(row => row.getInt("id"))
+    val result7 = rdd11.fold(0)((x, y) => x + y)
+    val expected7 = (100 to 109) reduce ((x, y) => x + y)
+    if (result7 != expected7) {
+      errors :+= "invalid fold result"
     }
 
     sc.stop()
