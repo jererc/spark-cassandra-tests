@@ -181,8 +181,8 @@ object SparkCassandraTests {
 
     // Test groupByKey
     val rdd14 = rdd13.groupByKey()
-    val result9 = rdd14.sortBy(_._1).collect
-    val expected9 = Array(("v1", Seq(1, 3)), ("v2", Seq(2, 4)), ("v3", Seq(5)))
+    val result9 = rdd14.sortBy(_._1).collect.map(x => (x._1, x._2.toSet))
+    val expected9 = Array(("v1", Set(1, 3)), ("v2", Set(2, 4)), ("v3", Set(5)))
     if (result9.deep != expected9.deep) {
       errors :+= "invalid groupByKey result"
     }
@@ -191,8 +191,8 @@ object SparkCassandraTests {
     if (result10.deep != expected10.deep) {
       errors :+= "invalid groupByKey keys"
     }
-    val result11 = rdd14.values.collect.sorted
-    val expected11 = Array(Seq(1, 3), Seq(2, 4), Seq(5))
+    val result11 = rdd14.values.collect.sorted.map(x => x.toSet)
+    val expected11 = Array(Set(1, 3), Set(2, 4), Set(5))
     if (result11.deep != expected11.deep) {
       errors :+= "invalid groupByKey values"
     }
